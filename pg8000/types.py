@@ -34,6 +34,7 @@ import datetime
 from decimal import Decimal
 from struct import unpack, pack
 from itertools import izip, islice
+import uuid
 from .errors import NotSupportedError, InternalError, ArrayContentEmptyError, \
     ArrayContentNotHomogenousError, ArrayContentNotSupportedError, \
     ArrayDimensionsNotConsistentError
@@ -451,6 +452,13 @@ def numeric_send(d, **kwargs):
 def numeric_out(v, **kwargs):
     return str(v)
 
+def uuid_recv(data, **kwargs):
+    return uuid.UUID(bytes=data)
+
+def uuid_send(v, **kwargs):
+    return v.bytes
+
+
 # PostgreSQL encodings:
 #   http://www.postgresql.org/docs/8.3/interactive/multibyte.html
 # Python encodings:
@@ -740,6 +748,7 @@ py_types = {
     Interval: {"typeoid": 1186, "bin_out": interval_send},
     type(None): {"typeoid": -1},
     list: {"inspect": array_inspect},
+    uuid.UUID: {"typeoid": 2950, "bin_out": uuid_send},
 }
 
 # py type -> pg array typeoid
@@ -784,4 +793,5 @@ pg_types = {
     1263: {"bin_in": array_recv},  # cstring[]
     1700: {"bin_in": numeric_recv},
     2275: {"bin_in": varcharin},  # cstring
+    2950: {"bin_in": uuid_recv}, #uuid
 }
