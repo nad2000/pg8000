@@ -1,20 +1,87 @@
 =PG8000
 
-PG8000 is a pure-Python PostgreSQL driver. The user docs are at 
-[[http://pybrary.net/pg8000/|http://pybrary.net/pg8000/]].
+PG8000 is a pure-[[http://www.python.org/|Python]]
+[[http://www.postgresql.org/|PostgreSQL]] driver that complies with
+[[http://www.python.org/dev/peps/pep-0249/|DB-API 2.0]]. The driver
+communicates with the database using the
+[[http://www.postgresql.org/docs/9.1/static/protocol.html|PostgreSQL Backend / Frontend Protocol]].
+The supported Python versions are:
 
-==Regression Tests
+* CPython 2.5
+* CPython 2.6
+* CPython 2.7
+* CPython 3.2
+* CPython 3.3
+* PyPy
+* Jython 2.5
 
-To run the regression tests, install [[https://github.com/nose-devs/nose|nose]]:
+==Usage
 
 {{{
-pip install nose
+
+>>> import pg8000
+>>> conn = pg8000.DBAPI.connect(user='postgres', password='password')
+
 }}}
 
-and run from the {{{pg8000}}} directory:
+The {{{connect}}} function takes the following parameters:
+
+|=parameter    |=default |
+|user          |         |
+|host          |localhost|
+|unix_sock     |         |
+|port          |5432     |
+|database      |         |
+|password      |         |
+|socket_timeout|60       |
+|ssl           |False    |
 
 {{{
-nosetests
+
+>>> pg8000.DBAPI.paramstyle = 'numeric'
+>>> cur = conn.cursor()
+>>> cur.execute("create temporary table example (id int, name varchar)")
+>>> cur.execute("insert into example values (1, 'hello')")
+>>> conn.commit()
+>>> cur.execute("select * from example where id = :1", (1,))
+>>> for row in cur:
+...     print(row)
+[1, 'hello']
+>>> cur.close()
+>>> conn.commit()
+
+}}}
+
+Following the DB-API specification, autocommit is off by default. It can be
+turned on by using the {{{autocommit}}} property of the connection.
+
+{{{
+
+>>> conn.autocommit = True
+>>> cur = conn.cursor()
+>>> cur.execute("vacuum")
+>>> conn.autocommit = False
+
+}}}
+
+=Regression Tests
+
+To run the regression tests, install [[http://testrun.org/tox/latest/|tox]]:
+
+{{{
+pip install tox
+}}}
+
+then add install all the supported Python versions, and add a line to pg_hba.conf requiring md5 for the database pg8000_md5, eg.
+
+{{{
+host    pg8000_md5      all             127.0.0.1/32            md5
+}}}
+
+and run {{{tox}}} from the {{{pg8000}}} directory:
+
+{{{
+tox
 }}}
 
 ==Performance Tests

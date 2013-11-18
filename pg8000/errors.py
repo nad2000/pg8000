@@ -30,11 +30,11 @@
 __author__ = "Mathieu Fenniak"
 
 
-class Warning(StandardError):
+class Warning(Exception):
     pass
 
 
-class Error(StandardError):
+class Error(Exception):
     pass
 
 

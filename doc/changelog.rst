@@ -1,24 +1,11 @@
 Release History
 ================
 
-Version 1.08, 2010-06-08
-------------------------
+Development
+-----------
 
 - Removed usage of deprecated :mod:`md5` module, replaced with :mod:`hashlib`.
   Thanks to Gavin Sherry for the patch.
-
-- Start transactions on execute or executemany, rather than immediately at the
-  end of previous transaction.  Thanks to Ben Moran for the patch.
-
-- Add encoding lookups where needed, to address usage of SQL_ASCII encoding.
-  Thanks to Benjamin Schweizer for the patch.
-
-- Remove record type cache SQL query on every new pg8000 connection.
-
-- Fix and test SSL connections.
-
-- Handle out-of-band messages during authentication.
-
 
 Version 1.07, 2009-01-06
 ------------------------
@@ -57,7 +44,7 @@ Version 1.06, 2008-12-09
 - Limited support for receiving RECORD types.  If a record type is received,
   it will be translated into a Python dict object.
 
-- Fixed potential threading bug where the socket lock could be lost during
+- Fixed potential threading bug where the socket lock could be lost during 
   error handling.
 
 

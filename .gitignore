@@ -1,10 +1,9 @@
 *.pyc
 *.swp
 *.orig
+*.class
 build
 tmp
 dist
-.venv
-test*.py
-pg8000.egg-info/
-
+.tox
+MANIFEST

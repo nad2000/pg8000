@@ -26,15 +26,22 @@
 # CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
-from __future__ import absolute_import
 
 __author__ = "Mathieu Fenniak"
 
-from . import dbapi as DBAPI
+
+exec("from struct import Struct")
+for fmt in (
+        "i", "h", "hhhh", "q", "d", "f", "iii", "ii", "qii", "dii", "ihihih",
+        "ci", "bh", "cccc"):
+    exec(fmt + "_struct = Struct('!" + fmt + "')")
+    exec(fmt + "_unpack = " + fmt + "_struct.unpack_from")
+    exec(fmt + "_pack = " + fmt + "_struct.pack")
+
+from pg8000 import dbapi as DBAPI
 pg8000_dbapi = DBAPI
 
-from .errors import DatabaseError
-#from .interface import *
-from .types import Bytea
+from pg8000.errors import Warning, DatabaseError
+from pg8000.pg8000_types import Bytea
 
-__all__ = [Bytea, DatabaseError]
+__all__ = [Warning, Bytea, DatabaseError]

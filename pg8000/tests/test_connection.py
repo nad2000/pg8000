@@ -4,6 +4,7 @@ import unittest
 from pg8000 import dbapi
 from contextlib import closing
 from .connection_settings import db_connect
+from pg8000.six import PY2, PRE_26
 
 
 # Tests related to connecting to a database.
@@ -19,25 +20,45 @@ class Tests(unittest.TestCase):
         self.assertRaises(dbapi.ProgrammingError, dbapi.connect, **data)
 
     def testNotify(self):
+
         try:
             db = dbapi.connect(**db_connect)
-            self.assert_(db.notifies == [])
+            self.assertEquals(db.notifies, [])
+            cursor = db.cursor()
+            cursor.execute("LISTEN test")
+            cursor.execute("NOTIFY test")
+            db.commit()
 
-            with closing(db.cursor()) as cursor:
-                cursor.execute("LISTEN test")
-                cursor.execute("NOTIFY test")
-                db.commit()
-
-                cursor.execute("VALUES (1, 2), (3, 4), (5, 6)")
-                self.assert_(len(db.notifies) == 1)
-                self.assert_(db.notifies[0][1] == "test")
-
+            cursor.execute("VALUES (1, 2), (3, 4), (5, 6)")
+            self.assertEquals(len(db.notifies), 1)
+            self.assertEquals(db.notifies[0][1], "test")
         finally:
+            cursor.close()
             db.close()
 
-    def testServerVersion(self):
-        with closing(dbapi.connect(**db_connect)) as db:
-            self.assertRegexpMatches(db.server_version, r'\d{1,2}\.\d(\.\d)?')
+    # This requires a line in pg_hba.conf that requires md5 for the database
+    # pg8000_md5
+
+    def testMd5(self):
+        data = db_connect.copy()
+        data["database"] = "pg8000_md5"
+
+        # Should only raise an exception saying db doesn't exist
+        if PY2:
+            self.assertRaises(
+                dbapi.ProgrammingError, dbapi.connect, **data)
+        else:
+            self.assertRaisesRegexp(
+                dbapi.ProgrammingError, '3D000', dbapi.connect, **data)
+
+    def testSsl(self):
+        data = db_connect.copy()
+        data["ssl"] = True
+        if PRE_26:
+            self.assertRaises(dbapi.InterfaceError, dbapi.connect, **data)
+        else:
+            with closing(dbapi.connect(**data)):
+                pass
 
 if __name__ == "__main__":
     unittest.main()
