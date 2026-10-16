@@ -1,27 +1,34 @@
 import unittest
-from pg8000 import errors, pg8000_types, dbapi
+import pg8000
+from pg8000 import PGJsonb, PGEnum
 import datetime
 import decimal
 import struct
-from .connection_settings import db_connect
-from pg8000.six import b, IS_JYTHON
+from connection_settings import db_connect
+from six import b, PY2, u
 import uuid
+import os
+import time
+from distutils.version import LooseVersion
+import sys
+import json
+import pytz
+from collections import OrderedDict
 
-db = dbapi.connect(**db_connect)
 
-if not IS_JYTHON:
-    import pytz
+IS_JYTHON = sys.platform.lower().count('java') > 0
 
 
 # Type conversion tests
 class Tests(unittest.TestCase):
     def setUp(self):
-        self.cursor = db.cursor()
+        self.db = pg8000.connect(**db_connect)
+        self.cursor = self.db.cursor()
 
     def tearDown(self):
-
         self.cursor.close()
         self.cursor = None
+        self.db.close()
 
     def testTimeRoundtrip(self):
         self.cursor.execute("SELECT %s as f1", (datetime.time(4, 5, 6),))
@@ -29,9 +36,10 @@ class Tests(unittest.TestCase):
         self.assertEqual(retval[0][0], datetime.time(4, 5, 6))
 
     def testDateRoundtrip(self):
-        self.cursor.execute("SELECT %s as f1", (datetime.date(2001, 2, 3),))
+        v = datetime.date(2001, 2, 3)
+        self.cursor.execute("SELECT %s as f1", (v,))
         retval = self.cursor.fetchall()
-        self.assertEqual(retval[0][0], datetime.date(2001, 2, 3))
+        self.assertEqual(retval[0][0], v)
 
     def testBoolRoundtrip(self):
         self.cursor.execute("SELECT %s as f1", (True,))
@@ -57,16 +65,18 @@ class Tests(unittest.TestCase):
         # See comment in TestNullRoundtrip.  This test is here to ensure that
         # this behaviour is documented and doesn't mysteriously change.
         self.assertRaises(
-            errors.ProgrammingError, self.cursor.execute,
+            pg8000.ProgrammingError, self.cursor.execute,
             "SELECT %s as f1", (None,))
-        db.rollback()
+        self.db.rollback()
 
     def testDecimalRoundtrip(self):
-        values = "1.1", "-1.1", "10000", "20000", "-1000000000.123456789"
+        values = (
+            "1.1", "-1.1", "10000", "20000", "-1000000000.123456789", "1.0",
+            "12.44")
         for v in values:
             self.cursor.execute("SELECT %s as f1", (decimal.Decimal(v),))
             retval = self.cursor.fetchall()
-            self.assertEqual(retval[0][0], decimal.Decimal(v))
+            self.assertEqual(str(retval[0][0]), v)
 
     def testFloatRoundtrip(self):
         # This test ensures that the binary float value doesn't change in a
@@ -79,6 +89,12 @@ class Tests(unittest.TestCase):
         bin_new = struct.pack("!d", retval[0][0])
         self.assertEqual(bin_new, bin_orig)
 
+    def test_float_plus_infinity_roundtrip(self):
+        v = float('inf')
+        self.cursor.execute("SELECT %s as f1", (v,))
+        retval = self.cursor.fetchall()
+        self.assertEqual(retval[0][0], v)
+
     def testStrRoundtrip(self):
         v = "hello world"
         self.cursor.execute(
@@ -88,22 +104,52 @@ class Tests(unittest.TestCase):
         retval = self.cursor.fetchall()
         self.assertEqual(retval[0][0], v)
 
-    def testUnicodeRoundtrip(self):
-        self.cursor.execute(
-            "SELECT cast(%s as varchar) as f1", ("hello \u0173 world",))
+        if PY2:
+            v = "hello \xce\x94 world"
+            self.cursor.execute("SELECT cast(%s as varchar) as f1", (v,))
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], v.decode('utf8'))
+
+    def test_str_then_int(self):
+        v1 = "hello world"
+        self.cursor.execute("SELECT cast(%s as varchar) as f1", (v1,))
         retval = self.cursor.fetchall()
-        self.assertEqual(retval[0][0], "hello \u0173 world")
+        self.assertEqual(retval[0][0], v1)
+
+        v2 = 1
+        self.cursor.execute("SELECT cast(%s as varchar) as f1", (v2,))
+        retval = self.cursor.fetchall()
+        self.assertEqual(retval[0][0], str(v2))
+
+    def testUnicodeRoundtrip(self):
+        v = u("hello \u0173 world")
+        self.cursor.execute("SELECT cast(%s as varchar) as f1", (v,))
+        retval = self.cursor.fetchall()
+        self.assertEqual(retval[0][0], v)
 
     def testLongRoundtrip(self):
-        self.cursor.execute("SELECT %s as f1", (50000000000000,))
+        self.cursor.execute(
+            "SELECT %s", (50000000000000,))
         retval = self.cursor.fetchall()
         self.assertEqual(retval[0][0], 50000000000000)
+
+    def testIntExecuteMany(self):
+        self.cursor.executemany("SELECT %s", ((1,), (40000,)))
+        self.cursor.fetchall()
+
+        v = ([None], [4])
+        self.cursor.execute(
+            "create temporary table test_int (f integer)")
+        self.cursor.executemany("INSERT INTO test_int VALUES (%s)", v)
+        self.cursor.execute("SELECT * from test_int")
+        retval = self.cursor.fetchall()
+        self.assertEqual(retval, v)
 
     def testIntRoundtrip(self):
         int2 = 21
         int4 = 23
         int8 = 20
-        #numeric = 1700
+
         test_values = [
             (0, int2),
             (-32767, int2),
@@ -115,22 +161,35 @@ class Tests(unittest.TestCase):
             (+2147483647, int4),
             (+2147483648, int8),
             (-9223372036854775807, int8),
-            (+9223372036854775807, int8), ]
-            #(-9223372036854775808, numeric),
-            #(+9223372036854775808, numeric),
+            (+9223372036854775807, int8)]
+
         for value, typoid in test_values:
-            self.cursor.execute("SELECT %s as f1", (value,))
+            self.cursor.execute("SELECT %s", (value,))
             retval = self.cursor.fetchall()
             self.assertEqual(retval[0][0], value)
             column_name, column_typeoid = self.cursor.description[0][0:2]
-            self.assertEqual(column_typeoid, typoid, "type should be INT2[]")
+            self.assertEqual(column_typeoid, typoid)
 
     def testByteaRoundtrip(self):
         self.cursor.execute(
             "SELECT %s as f1",
-            (dbapi.Binary(b("\x00\x01\x02\x03\x02\x01\x00")),))
+            (pg8000.Binary(b("\x00\x01\x02\x03\x02\x01\x00")),))
         retval = self.cursor.fetchall()
         self.assertEqual(retval[0][0], b("\x00\x01\x02\x03\x02\x01\x00"))
+
+    def test_bytearray_round_trip(self):
+        binary = b'\x00\x01\x02\x03\x02\x01\x00'
+        self.cursor.execute("SELECT %s as f1", (bytearray(binary),))
+        retval = self.cursor.fetchall()
+        self.assertEqual(retval[0][0], binary)
+
+    def test_bytearray_subclass_round_trip(self):
+        class BClass(bytearray):
+            pass
+        binary = b'\x00\x01\x02\x03\x02\x01\x00'
+        self.cursor.execute("SELECT %s as f1", (BClass(binary),))
+        retval = self.cursor.fetchall()
+        self.assertEqual(retval[0][0], binary)
 
     def testTimestampRoundtrip(self):
         v = datetime.datetime(2001, 2, 3, 4, 5, 6, 170000)
@@ -138,18 +197,40 @@ class Tests(unittest.TestCase):
         retval = self.cursor.fetchall()
         self.assertEqual(retval[0][0], v)
 
+        # Test that time zone doesn't affect it
+        # Jython 2.5.3 doesn't have a time.tzset() so skip
+        if not IS_JYTHON:
+            orig_tz = os.environ.get('TZ')
+            os.environ['TZ'] = "America/Edmonton"
+            time.tzset()
+
+            self.cursor.execute("SELECT %s as f1", (v,))
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], v)
+
+            if orig_tz is None:
+                del os.environ['TZ']
+            else:
+                os.environ['TZ'] = orig_tz
+            time.tzset()
+
     def testIntervalRoundtrip(self):
-        v = pg8000_types.Interval(microseconds=123456789, days=2, months=24)
+        v = pg8000.Interval(microseconds=123456789, days=2, months=24)
         self.cursor.execute("SELECT %s as f1", (v,))
         retval = self.cursor.fetchall()
         self.assertEqual(retval[0][0], v)
 
-    def testEnumRoundtrip(self):
+        v = datetime.timedelta(seconds=30)
+        self.cursor.execute("SELECT %s as f1", (v,))
+        retval = self.cursor.fetchall()
+        self.assertEqual(retval[0][0], v)
+
+    def test_enum_str_round_trip(self):
         try:
             self.cursor.execute(
                 "create type lepton as enum ('electron', 'muon', 'tau')")
-        except errors.ProgrammingError:
-            db.rollback()
+        except pg8000.ProgrammingError:
+            self.db.rollback()
 
         v = 'muon'
         self.cursor.execute("SELECT cast(%s as lepton) as f1", (v,))
@@ -158,10 +239,71 @@ class Tests(unittest.TestCase):
         self.cursor.execute(
             "CREATE TEMPORARY TABLE testenum "
             "(f1 lepton)")
-        self.cursor.execute("INSERT INTO testenum VALUES (%s)", ('electron',))
+        self.cursor.execute(
+            "INSERT INTO testenum VALUES (cast(%s as lepton))", ('electron',))
         self.cursor.execute("drop table testenum")
         self.cursor.execute("drop type lepton")
-        db.commit()
+        self.db.commit()
+
+    def test_enum_custom_round_trip(self):
+        class Lepton(object):
+            # Implements PEP 435 in the minimal fashion needed
+            __members__ = OrderedDict()
+
+            def __init__(self, name, value, alias=None):
+                self.name = name
+                self.value = value
+                self.__members__[name] = self
+                setattr(self.__class__, name, self)
+                if alias:
+                    self.__members__[alias] = self
+                    setattr(self.__class__, alias, self)
+
+        try:
+            self.cursor.execute(
+                "create type lepton as enum ('1', '2', '3')")
+        except pg8000.ProgrammingError:
+            self.db.rollback()
+
+        v = Lepton('muon', '2')
+        self.cursor.execute(
+            "SELECT cast(%s as lepton) as f1", (PGEnum(v),))
+        retval = self.cursor.fetchall()
+        self.assertEqual(retval[0][0], v.value)
+        self.cursor.execute("drop type lepton")
+        self.db.commit()
+
+    def test_enum_py_round_trip(self):
+        try:
+            from enum import Enum
+
+            class Lepton(Enum):
+                electron = '1'
+                muon = '2'
+                tau = '3'
+
+            try:
+                self.cursor.execute(
+                    "create type lepton as enum ('1', '2', '3')")
+            except pg8000.ProgrammingError:
+                self.db.rollback()
+
+            v = Lepton.muon
+            self.cursor.execute("SELECT cast(%s as lepton) as f1", (v,))
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], v.value)
+
+            self.cursor.execute(
+                "CREATE TEMPORARY TABLE testenum "
+                "(f1 lepton)")
+            self.cursor.execute(
+                "INSERT INTO testenum VALUES (cast(%s as lepton))",
+                (Lepton.electron,))
+            self.cursor.execute("drop table testenum")
+            self.cursor.execute("drop type lepton")
+            self.db.commit()
+        except ImportError:
+            pass
 
     def testXmlRoundtrip(self):
         v = '<genome>gatccgagtac</genome>'
@@ -175,6 +317,48 @@ class Tests(unittest.TestCase):
         retval = self.cursor.fetchall()
         self.assertEqual(retval[0][0], v)
 
+    def testInetRoundtrip(self):
+        try:
+            import ipaddress
+
+            v = ipaddress.ip_network('192.168.0.0/28')
+            self.cursor.execute("select %s as f1", (v,))
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], v)
+
+            v = ipaddress.ip_address('192.168.0.1')
+            self.cursor.execute("select %s as f1", (v,))
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], v)
+
+        except ImportError:
+            for v in ('192.168.100.128/25', '192.168.0.1'):
+                self.cursor.execute(
+                    "select cast(cast(%s as varchar) as inet) as f1", (v,))
+                retval = self.cursor.fetchall()
+                self.assertEqual(retval[0][0], v)
+
+    def testXidRoundtrip(self):
+        v = 86722
+        self.cursor.execute(
+            "select cast(cast(%s as varchar) as xid) as f1", (v,))
+        retval = self.cursor.fetchall()
+        self.assertEqual(retval[0][0], v)
+
+        # Should complete without an exception
+        self.cursor.execute(
+            "select * from pg_locks where transactionid = %s", (97712,))
+        retval = self.cursor.fetchall()
+
+    def testInt2VectorIn(self):
+        self.cursor.execute("select cast('1 2' as int2vector) as f1")
+        retval = self.cursor.fetchall()
+        self.assertEqual(retval[0][0], [1, 2])
+
+        # Should complete without an exception
+        self.cursor.execute("select indkey from pg_index")
+        retval = self.cursor.fetchall()
+
     def testTimestampTzOut(self):
         self.cursor.execute(
             "SELECT '2001-02-03 04:05:06.17 America/Edmonton'"
@@ -183,8 +367,8 @@ class Tests(unittest.TestCase):
         dt = retval[0][0]
         self.assertEqual(dt.tzinfo is not None, True, "no tzinfo returned")
         self.assertEqual(
-            dt.astimezone(pg8000_types.utc),
-            datetime.datetime(2001, 2, 3, 11, 5, 6, 170000, pg8000_types.utc),
+            dt.astimezone(pg8000.utc),
+            datetime.datetime(2001, 2, 3, 11, 5, 6, 170000, pg8000.utc),
             "retrieved value match failed")
 
     def testTimestampTzRoundtrip(self):
@@ -304,10 +488,20 @@ class Tests(unittest.TestCase):
             "SELECT '1 month 16 days 12 hours 32 minutes 64 seconds'"
             "::interval")
         retval = self.cursor.fetchall()
-        expected_value = pg8000_types.Interval(
+        expected_value = pg8000.Interval(
             microseconds=(12 * 60 * 60 * 1000 * 1000) +
             (32 * 60 * 1000 * 1000) + (64 * 1000 * 1000),
             days=16, months=1)
+        self.assertEqual(retval[0][0], expected_value)
+
+        self.cursor.execute("select interval '30 seconds'")
+        retval = self.cursor.fetchall()
+        expected_value = datetime.timedelta(seconds=30)
+        self.assertEqual(retval[0][0], expected_value)
+
+        self.cursor.execute("select interval '12 days 30 seconds'")
+        retval = self.cursor.fetchall()
+        expected_value = datetime.timedelta(days=12, seconds=30)
         self.assertEqual(retval[0][0], expected_value)
 
     def testTimestampOut(self):
@@ -322,13 +516,13 @@ class Tests(unittest.TestCase):
         methods = (
             ("float8send", 22.2),
             ("timestamp_send", datetime.datetime(2001, 2, 3, 4, 5, 6, 789)),
-            ("byteasend", dbapi.Binary(b("\x01\x02"))),
-            ("interval_send", pg8000_types.Interval(1234567, 123, 123)),)
+            ("byteasend", pg8000.Binary(b("\x01\x02"))),
+            ("interval_send", pg8000.Interval(1234567, 123, 123)),)
         for method_out, value in methods:
             self.cursor.execute("SELECT %s(%%s) as f1" % method_out, (value,))
             retval = self.cursor.fetchall()
             self.assertEqual(
-                retval[0][0], db.make_params((value,))[0][2](value))
+                retval[0][0], self.db.make_params((value,))[0][2](value))
 
     def testInt4ArrayOut(self):
         self.cursor.execute(
@@ -410,14 +604,15 @@ class Tests(unittest.TestCase):
         self.assertEqual(column_typeoid, 1005, "type should be INT2[]")
 
         # a larger value should kick it up to INT4[]...
-        self.cursor.execute("SELECT %s as f1", ([70000, 2, 3],))
+        self.cursor.execute("SELECT %s as f1 -- integer[]", ([70000, 2, 3],))
         retval = self.cursor.fetchall()
         self.assertEqual(retval[0][0], [70000, 2, 3])
         column_name, column_typeoid = self.cursor.description[0][0:2]
         self.assertEqual(column_typeoid, 1007, "type should be INT4[]")
 
         # a much larger value should kick it up to INT8[]...
-        self.cursor.execute("SELECT %s as f1", ([7000000000, 2, 3],))
+        self.cursor.execute(
+            "SELECT %s as f1 -- bigint[]", ([7000000000, 2, 3],))
         retval = self.cursor.fetchall()
         self.assertEqual(
             retval[0][0], [7000000000, 2, 3],
@@ -453,6 +648,8 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.cursor.fetchone()[0], ["a", "b", "c"])
         self.cursor.execute("SELECT '{}'::text[];")
         self.assertEqual(self.cursor.fetchone()[0], [])
+        self.cursor.execute("SELECT '{NULL,\"NULL\",NULL,\"\"}'::text[];")
+        self.assertEqual(self.cursor.fetchone()[0], [None, 'NULL', None, ""])
 
     def testNumericArrayOut(self):
         self.cursor.execute("SELECT '{1.1,2.2,3.3}'::numeric[] AS f1")
@@ -468,27 +665,34 @@ class Tests(unittest.TestCase):
         self.assertEqual(retval[0][0], v)
 
     def testStringArrayRoundtrip(self):
-        self.cursor.execute("SELECT %s as f1", (["Hello!", "World!", None],))
+        v = [
+            "Hello!", "World!", "abcdefghijklmnopqrstuvwxyz", "",
+            "A bunch of random characters:",
+            " ~!@#$%^&*()_+`1234567890-=[]\\{}|{;':\",./<>?\t", None]
+        self.cursor.execute("SELECT %s as f1", (v,))
         retval = self.cursor.fetchall()
-        self.assertEqual(retval[0][0], ["Hello!", "World!", None])
+        self.assertEqual(retval[0][0], v)
 
-        self.cursor.execute("SELECT %s as f1", (["Hello!", "World!", None],))
+    def testUnicodeArrayRoundtrip(self):
+        if PY2:
+            v = map(unicode, ("Second", "To", None))  # noqa
+            self.cursor.execute("SELECT %s as f1", (v,))
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], v)
+
+    def testEmptyArray(self):
+        v = []
+        self.cursor.execute("SELECT %s as f1", (v,))
         retval = self.cursor.fetchall()
-        self.assertEqual(retval[0][0], ["Hello!", "World!", None])
-
-    def testArrayHasValue(self):
-        self.assertRaises(
-            errors.ArrayContentEmptyError,
-            db.array_inspect, [[None], [None], [None]])
-        db.rollback()
+        self.assertEqual(retval[0][0], v)
 
     def testArrayContentNotSupported(self):
         class Kajigger(object):
             pass
         self.assertRaises(
-            errors.ArrayContentNotSupportedError,
-            db.array_inspect, [[Kajigger()], [None], [None]])
-        db.rollback()
+            pg8000.ArrayContentNotSupportedError,
+            self.db.array_inspect, [[Kajigger()], [None], [None]])
+        self.db.rollback()
 
     def testArrayDimensions(self):
         for arr in (
@@ -498,27 +702,113 @@ class Tests(unittest.TestCase):
                 [[[[1]]], [[[2]]], [[[3, 4]]]],
                 [[1, 2, 3], [4, [5], 6]]):
 
-            arr_send = db.array_inspect(arr)[2]
+            arr_send = self.db.array_inspect(arr)[2]
             self.assertRaises(
-                errors.ArrayDimensionsNotConsistentError, arr_send, arr)
-            db.rollback()
+                pg8000.ArrayDimensionsNotConsistentError, arr_send, arr)
+            self.db.rollback()
 
     def testArrayHomogenous(self):
         arr = [[[1]], [[2]], [[3.1]]]
-        arr_send = db.array_inspect(arr)[2]
+        arr_send = self.db.array_inspect(arr)[2]
         self.assertRaises(
-            errors.ArrayContentNotHomogenousError, arr_send, arr)
-        db.rollback()
+            pg8000.ArrayContentNotHomogenousError, arr_send, arr)
+        self.db.rollback()
 
     def testArrayInspect(self):
-        db.array_inspect([1, 2, 3])
-        db.array_inspect([[1], [2], [3]])
-        db.array_inspect([[[1]], [[2]], [[3]]])
+        self.db.array_inspect([1, 2, 3])
+        self.db.array_inspect([[1], [2], [3]])
+        self.db.array_inspect([[[1]], [[2]], [[3]]])
 
     def testMacaddr(self):
         self.cursor.execute("SELECT macaddr '08002b:010203'")
         retval = self.cursor.fetchall()
         self.assertEqual(retval[0][0], "08:00:2b:01:02:03")
+
+    def testTsvectorRoundtrip(self):
+        self.cursor.execute(
+            "SELECT cast(%s as tsvector)",
+            ('a fat cat sat on a mat and ate a fat rat',))
+        retval = self.cursor.fetchall()
+        self.assertEqual(
+            retval[0][0], "'a' 'and' 'ate' 'cat' 'fat' 'mat' 'on' 'rat' 'sat'")
+
+    def testHstoreRoundtrip(self):
+        val = '"a"=>"1"'
+        self.cursor.execute("SELECT cast(%s as hstore)", (val,))
+        retval = self.cursor.fetchall()
+        self.assertEqual(retval[0][0], val)
+
+    def testJsonRoundtrip(self):
+        if self.db._server_version >= LooseVersion('9.2'):
+            val = {'name': 'Apollo 11 Cave', 'zebra': True, 'age': 26.003}
+            self.cursor.execute(
+                "SELECT %s", (pg8000.PGJson(val),))
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], val)
+
+    def testJsonbRoundtrip(self):
+        if self.db._server_version >= LooseVersion('9.4'):
+            val = {'name': 'Apollo 11 Cave', 'zebra': True, 'age': 26.003}
+            self.cursor.execute(
+                "SELECT cast(%s as jsonb)", (json.dumps(val),))
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], val)
+
+    def test_json_access_object(self):
+        if self.db._server_version >= LooseVersion('9.4'):
+            val = {'name': 'Apollo 11 Cave', 'zebra': True, 'age': 26.003}
+            self.cursor.execute(
+                "SELECT cast(%s as json) -> %s", (json.dumps(val), 'name'))
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], 'Apollo 11 Cave')
+
+    def test_jsonb_access_object(self):
+        if self.db._server_version >= LooseVersion('9.4'):
+            val = {'name': 'Apollo 11 Cave', 'zebra': True, 'age': 26.003}
+            self.cursor.execute(
+                "SELECT cast(%s as jsonb) -> %s", (json.dumps(val), 'name'))
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], 'Apollo 11 Cave')
+
+    def test_json_access_array(self):
+        if self.db._server_version >= LooseVersion('9.4'):
+            val = [-1, -2, -3, -4, -5]
+            self.cursor.execute(
+                "SELECT cast(%s as json) -> %s", (json.dumps(val), 2))
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], -3)
+
+    def testJsonbAccessArray(self):
+        if self.db._server_version >= LooseVersion('9.4'):
+            val = [-1, -2, -3, -4, -5]
+            self.cursor.execute(
+                "SELECT cast(%s as jsonb) -> %s", (json.dumps(val), 2))
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], -3)
+
+    def test_jsonb_access_path(self):
+        if self.db._server_version >= LooseVersion('9.4'):
+            j = {
+                "a": [1, 2, 3],
+                "b": [4, 5, 6]}
+
+            path = ['a', '2']
+
+            self.cursor.execute("SELECT %s #>> %s", [PGJsonb(j), path])
+            retval = self.cursor.fetchall()
+            self.assertEqual(retval[0][0], str(j[path[0]][int(path[1])]))
+
+    def test_timestamp_send_float(self):
+        assert b('A\xbe\x19\xcf\x80\x00\x00\x00') == \
+            pg8000.core.timestamp_send_float(
+                datetime.datetime(2016, 1, 2, 0, 0))
+
+    def test_infinity_timestamp_roundtrip(self):
+        v = 'infinity'
+        self.cursor.execute("SELECT cast(%s as timestamp) as f1", (v,))
+        retval = self.cursor.fetchall()
+        self.assertEqual(retval[0][0], v)
+
 
 if __name__ == "__main__":
     unittest.main()

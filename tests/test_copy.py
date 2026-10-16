@@ -1,35 +1,39 @@
 import unittest
-from pg8000 import dbapi
-from .connection_settings import db_connect
-from pg8000.six import b, BytesIO
+import pg8000
+from connection_settings import db_connect
+from six import b, BytesIO, u, iteritems
 from sys import exc_info
-
-db = dbapi.connect(**db_connect)
 
 
 class Tests(unittest.TestCase):
     def setUp(self):
+        self.db = pg8000.connect(**db_connect)
         try:
-            cursor = db.cursor()
+            cursor = self.db.cursor()
             try:
-                cursor = db.cursor()
+                cursor = self.db.cursor()
                 cursor.execute("DROP TABLE t1")
-            except dbapi.DatabaseError:
+            except pg8000.DatabaseError:
                 e = exc_info()[1]
                 # the only acceptable error is:
+                msg = e.args[0]
+                code = msg['C']
                 self.assertEqual(
-                    e.args[1], b('42P01'),  # table does not exist
-                    "incorrect error for drop table")
-                db.rollback()
+                    code, '42P01',  # table does not exist
+                    "incorrect error for drop table: " + str(msg))
+                self.db.rollback()
             cursor.execute(
                 "CREATE TEMPORARY TABLE t1 (f1 int primary key, "
                 "f2 int not null, f3 varchar(50) null)")
         finally:
             cursor.close()
 
+    def tearDown(self):
+        self.db.close()
+
     def testCopyToWithTable(self):
         try:
-            cursor = db.cursor()
+            cursor = self.db.cursor()
             cursor.execute(
                 "INSERT INTO t1 (f1, f2, f3) VALUES (%s, %s, %s)", (1, 1, 1))
             cursor.execute(
@@ -38,66 +42,77 @@ class Tests(unittest.TestCase):
                 "INSERT INTO t1 (f1, f2, f3) VALUES (%s, %s, %s)", (3, 3, 3))
 
             stream = BytesIO()
-            cursor.copy_to(stream, "t1")
+            cursor.execute("copy t1 to stdout", stream=stream)
             self.assertEqual(
                 stream.getvalue(), b("1\t1\t1\n2\t2\t2\n3\t3\t3\n"))
             self.assertEqual(cursor.rowcount, 3)
-            db.commit()
+            self.db.commit()
         finally:
             cursor.close()
 
     def testCopyToWithQuery(self):
         try:
-            cursor = db.cursor()
+            cursor = self.db.cursor()
             stream = BytesIO()
-            cursor.copy_to(
-                stream, query="COPY (SELECT 1 as One, 2 as Two) TO STDOUT "
-                "WITH DELIMITER 'X' CSV HEADER QUOTE AS 'Y' FORCE QUOTE Two")
+            cursor.execute(
+                "COPY (SELECT 1 as One, 2 as Two) TO STDOUT WITH DELIMITER "
+                "'X' CSV HEADER QUOTE AS 'Y' FORCE QUOTE Two", stream=stream)
             self.assertEqual(stream.getvalue(), b('oneXtwo\n1XY2Y\n'))
             self.assertEqual(cursor.rowcount, 1)
-            db.rollback()
+            self.db.rollback()
         finally:
             cursor.close()
 
     def testCopyFromWithTable(self):
         try:
-            cursor = db.cursor()
+            cursor = self.db.cursor()
             stream = BytesIO(b("1\t1\t1\n2\t2\t2\n3\t3\t3\n"))
-            cursor.copy_from(stream, "t1")
+            cursor.execute("copy t1 from STDIN", stream=stream)
             self.assertEqual(cursor.rowcount, 3)
 
             cursor.execute("SELECT * FROM t1 ORDER BY f1")
             retval = cursor.fetchall()
             self.assertEqual(retval, ([1, 1, '1'], [2, 2, '2'], [3, 3, '3']))
-            db.rollback()
+            self.db.rollback()
         finally:
             cursor.close()
 
     def testCopyFromWithQuery(self):
         try:
-            cursor = db.cursor()
+            cursor = self.db.cursor()
             stream = BytesIO(b("f1Xf2\n1XY1Y\n"))
-            cursor.copy_from(
-                stream, query="COPY t1 (f1, f2) FROM STDIN WITH DELIMITER "
-                "'X' CSV HEADER QUOTE AS 'Y' FORCE NOT NULL f1")
+            cursor.execute(
+                "COPY t1 (f1, f2) FROM STDIN WITH DELIMITER 'X' CSV HEADER "
+                "QUOTE AS 'Y' FORCE NOT NULL f1", stream=stream)
             self.assertEqual(cursor.rowcount, 1)
 
             cursor.execute("SELECT * FROM t1 ORDER BY f1")
             retval = cursor.fetchall()
             self.assertEqual(retval, ([1, 1, None],))
-            db.commit()
+            self.db.commit()
         finally:
             cursor.close()
 
-    def testCopyWithoutTableOrQuery(self):
+    def testCopyFromWithError(self):
         try:
-            cursor = db.cursor()
-            stream = BytesIO()
-            self.assertRaises(
-                dbapi.CopyQueryOrTableRequiredError, cursor.copy_from, stream)
-            self.assertRaises(
-                dbapi.CopyQueryOrTableRequiredError, cursor.copy_to, stream)
-            db.rollback()
+            cursor = self.db.cursor()
+            stream = BytesIO(b("f1Xf2\n\n1XY1Y\n"))
+            cursor.execute(
+                "COPY t1 (f1, f2) FROM STDIN WITH DELIMITER 'X' CSV HEADER "
+                "QUOTE AS 'Y' FORCE NOT NULL f1", stream=stream)
+            self.assertTrue(False, "Should have raised an exception")
+        except:
+            args_dict = {
+                'S': u('ERROR'),
+                'C': u('22P02'),
+                'M': u('invalid input syntax for integer: ""'),
+                'W': u('COPY t1, line 2, column f1: ""'),
+                'F': u('numutils.c'),
+                'R': u('pg_atoi')
+            }
+            args = exc_info()[1].args[0]
+            for k, v in iteritems(args_dict):
+                self.assertEqual(args[k], v)
         finally:
             cursor.close()
 

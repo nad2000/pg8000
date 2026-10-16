@@ -1,5 +1,5 @@
 import unittest
-from pg8000.pg8000_types import Interval
+from pg8000 import Interval
 
 
 # Type conversion tests
@@ -43,6 +43,7 @@ class Tests(unittest.TestCase):
             -9223372036854775807, +9223372036854775807,)
         self.intervalRangeTest(
             "microseconds", in_range_microseconds, out_of_range_microseconds)
+
 
 if __name__ == "__main__":
     unittest.main()

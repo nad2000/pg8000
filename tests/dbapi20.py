@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+import unittest
+import time
+import warnings
+from six import b
 ''' Python DB API 2.0 driver compliance unit test suite.
 
     This software is Public Domain and may be used without restrictions.
@@ -15,10 +19,6 @@ __rcs_id__ = '$Id: dbapi20.py,v 1.10 2003/10/09 03:14:14 zenzen Exp $'
 __version__ = '$Revision: 1.10 $'[11:-2]
 __author__ = 'Stuart Bishop <zen@shangri-la.dropbear.id.au>'
 
-import unittest
-import time
-import warnings
-from pg8000.six import b
 
 # $Log: dbapi20.py,v $
 # Revision 1.10  2003/10/09 03:14:14  zenzen
@@ -98,8 +98,9 @@ class DatabaseAPI20Test(unittest.TestCase):
     xddl1 = 'drop table %sbooze' % table_prefix
     xddl2 = 'drop table %sbarflys' % table_prefix
 
-    lowerfunc = 'lower'  # Name of stored procedure to convert
-                         # string->lowercase
+    # Name of stored procedure to convert
+    # string->lowercase
+    lowerfunc = 'lower'
 
     # Some drivers may need to override these helpers, for example adding
     # a 'commit' after the execute.
@@ -214,6 +215,7 @@ class DatabaseAPI20Test(unittest.TestCase):
         self.assertEqual(con.ProgrammingError is drv.ProgrammingError, True)
         self.assertEqual(con.NotSupportedError is drv.NotSupportedError, True)
         warnings.resetwarnings()
+        con.close()
 
     def test_commit(self):
         con = self._connect()
@@ -232,6 +234,7 @@ class DatabaseAPI20Test(unittest.TestCase):
                 con.rollback()
             except self.driver.NotSupportedError:
                 pass
+        con.close()
 
     def test_cursor(self):
         con = self._connect()
@@ -527,7 +530,7 @@ class DatabaseAPI20Test(unittest.TestCase):
             cur = con.cursor()
 
             # cursor.fetchmany should raise an Error if called without
-            #issuing a query
+            # issuing a query
             self.assertRaises(self.driver.Error, cur.fetchmany, 4)
 
             self.executeDDL1(cur)
@@ -688,19 +691,10 @@ class DatabaseAPI20Test(unittest.TestCase):
             number of rows in booze then "name from booze"
         '''
         raise NotImplementedError('Helper not implemented')
-        #sql="""
-        #    create procedure deleteme as
-        #    begin
-        #        select count(*) from booze
-        #        select name from booze
-        #    end
-        #"""
-        #cur.execute(sql)
 
     def help_nextset_tearDown(self, cur):
         'If cleaning up is needed after nextSetTest'
         raise NotImplementedError('Helper not implemented')
-        #cur.execute("drop procedure deleteme")
 
     def test_nextset(self):
         con = self._connect()
